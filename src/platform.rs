@@ -51,6 +51,23 @@ pub fn confirm(message: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True si la app corre dentro de la ventana de escritorio (Tauri) en vez de
+/// en un navegador. Tauri inyecta estos objetos en `window`.
+///
+/// Importa porque el webview de Tauri ignora las descargas por blob: el enlace
+/// se pulsa y no pasa nada, sin error. Ahi hay que entregar el CSV de otra
+/// forma.
+pub fn es_escritorio() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    ["__TAURI_INTERNALS__", "__TAURI__"].iter().any(|clave| {
+        js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str(clave))
+            .map(|v| !v.is_undefined() && !v.is_null())
+            .unwrap_or(false)
+    })
+}
+
 /// Lanza la descarga de un archivo de texto generado en memoria.
 pub fn download_text(filename: &str, content: &str) {
     let Some(window) = web_sys::window() else { return };
