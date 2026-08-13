@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # write hace falta para publicar la Release con el .exe adjunto.
+  contents: write
 
 jobs:
   windows:
@@ -120,3 +121,23 @@ jobs:
           name: TokonTechLog-windows
           path: salida/
           if-no-files-found: error
+
+      # Ademas del artefacto (que siempre viene en zip), se publica una
+      # Release: ahi el .exe se descarga directo, sin descomprimir, y el
+      # enlace es fijo para poder pasarselo a alguien.
+      - name: Publicar la Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="desktop-${{ github.run_number }}"
+          gh release create "$TAG" salida/* \
+            --title "Tokon Tech Log - escritorio (build ${{ github.run_number }})" \
+            --notes "Version de escritorio para Windows.
+
+          - **TokonTechLog.exe**: portable, doble clic y listo.
+          - **...setup.exe**: instalador, si prefieres acceso directo en el menu Inicio.
+
+          La ventana arranca siempre encima del resto. Necesita Windows 10/11." \
+            --latest
+          echo "Publicado en: ${{ github.server_url }}/${{ github.repository }}/releases/latest"
