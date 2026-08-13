@@ -1,0 +1,95 @@
+name: Compilar el .exe de Windows
+
+# Se lanza a mano desde la pestana Actions, o en cada push a main.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Son dos proyectos separados: la app web y la envoltura de escritorio.
+          workspaces: |
+            .
+            src-tauri
+
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # Diagnostico: si falta algun archivo, dice CUALES de golpe en vez de
+      # ir descubriendolos de uno en uno a base de compilaciones fallidas.
+      - name: Comprobar que el proyecto esta completo
+        shell: bash
+        run: |
+          echo "--- Raiz del repositorio ---"
+          ls -la
+          echo
+          echo "--- src/ ---"
+          ls -la src src/components 2>&1 || true
+          echo
+          echo "--- src-tauri/ ---"
+          ls -la src-tauri src-tauri/src src-tauri/icons 2>&1 || true
+          echo
+          faltan=0
+          for f in \
+            index.html Trunk.toml styles.css Cargo.toml Cargo.lock \
+            src/main.rs src/lib.rs src/model.rs src/notation.rs src/csv.rs \
+            src/app.rs src/platform.rs \
+            src/components/mod.rs src/components/entry_form.rs \
+            src/components/entry_card.rs src/components/team_editor.rs \
+            src/components/notation_view.rs src/components/icons.rs \
+            src-tauri/Cargo.toml src-tauri/build.rs src-tauri/tauri.conf.json \
+            src-tauri/src/main.rs \
+            src-tauri/icons/32x32.png src-tauri/icons/128x128.png \
+            src-tauri/icons/128x128@2x.png src-tauri/icons/icon.ico
+          do
+            if [ -f "$f" ]; then
+              echo "OK     $f"
+            else
+              echo "FALTA  $f"
+              faltan=1
+            fi
+          done
+          echo
+          if [ "$faltan" = "1" ]; then
+            echo "Hay archivos sin subir. Mira la lista de arriba: los que ponen FALTA."
+            exit 1
+          fi
+          echo "Todo en su sitio."
+
+      # Tiene que ir antes de compilar el .exe: Tauri mete estos archivos
+      # dentro del ejecutable, asi que la carpeta dist/ debe existir ya.
+      # Sin --public-url, porque aqui todo cuelga de la raiz.
+      - name: Compilar la interfaz a WebAssembly
+        run: trunk build --release
+
+      - name: Compilar el ejecutable
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Preparar el archivo para descargar
+        shell: bash
+        run: |
+          mkdir -p salida
+          cp "src-tauri/target/release/tokon-tech-log-desktop.exe" "salida/TokonTechLog.exe"
+          ls -la salida
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokonTechLog-windows
+          path: salida/TokonTechLog.exe
+          if-no-files-found: error
