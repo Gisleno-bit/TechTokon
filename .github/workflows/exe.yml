@@ -78,18 +78,45 @@ jobs:
       - name: Compilar la interfaz a WebAssembly
         run: trunk build --release
 
-      - name: Compilar el ejecutable
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+      # Hay que compilar con la CLI de Tauri, no con "cargo build" a secas.
+      # Es la CLI la que marca la compilacion como final; sin ella el .exe se
+      # queda en modo desarrollo y al abrirlo busca la web en localhost:8080
+      # en vez de llevarla dentro. Se instala por npm porque trae el binario
+      # ya compilado (segundos, en vez de varios minutos con cargo install).
+      - name: Instalar la CLI de Tauri
+        shell: bash
+        run: npm install -g "@tauri-apps/cli@^2"
 
-      - name: Preparar el archivo para descargar
+      - name: Compilar el ejecutable
+        shell: bash
+        run: tauri build
+
+      - name: Recoger el ejecutable
         shell: bash
         run: |
           mkdir -p salida
-          cp "src-tauri/target/release/tokon-tech-log-desktop.exe" "salida/TokonTechLog.exe"
+          shopt -s nullglob
+
+          # El nombre del .exe depende de la configuracion de Tauri, asi que
+          # se busca en vez de darlo por supuesto.
+          encontrados=(src-tauri/target/release/*.exe)
+          if [ ${#encontrados[@]} -eq 0 ]; then
+            echo "No ha aparecido ningun .exe. Contenido de la carpeta:"
+            ls -la src-tauri/target/release || true
+            exit 1
+          fi
+          cp "${encontrados[0]}" "salida/TokonTechLog.exe"
+
+          # Si Tauri ha generado tambien el instalador, va de propina.
+          for inst in src-tauri/target/release/bundle/nsis/*.exe; do
+            cp "$inst" "salida/"
+          done
+
+          echo "--- Listo para descargar ---"
           ls -la salida
 
       - uses: actions/upload-artifact@v4
         with:
           name: TokonTechLog-windows
-          path: salida/TokonTechLog.exe
+          path: salida/
           if-no-files-found: error
