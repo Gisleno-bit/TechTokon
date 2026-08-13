@@ -11,7 +11,7 @@ use tokon_tech_log::model::{
     TechData, CHARACTERS,
 };
 use tokon_tech_log::notation::{button_style, LEGEND};
-use web_sys::HtmlInputElement;
+use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
 /// Filtro de categoria de la barra de chips. `None` = todo.
@@ -69,7 +69,24 @@ pub fn app() -> Html {
     let editing_id = use_state(|| None as Option<String>);
     let team_editor_open = use_state(|| false);
     let import_result = use_state(|| None as Option<csv::ImportResult>);
+    // En escritorio la descarga no funciona, asi que el CSV se muestra aqui
+    // para copiarlo. En navegador esto se queda siempre en None.
+    let export_text = use_state(|| None as Option<String>);
     let file_ref = use_node_ref();
+    let export_ref = use_node_ref();
+
+    // Al abrirse el panel, deja el texto ya seleccionado: solo hay que
+    // pulsar Ctrl+C.
+    {
+        let export_ref = export_ref.clone();
+        use_effect_with((*export_text).clone(), move |texto| {
+            if texto.is_some() {
+                if let Some(area) = export_ref.cast::<HtmlTextAreaElement>() {
+                    area.select();
+                }
+            }
+        });
+    }
 
     // Guarda y avisa en la cabecera si el navegador rechaza el guardado.
     let persist = {
@@ -186,18 +203,31 @@ pub fn app() -> Html {
         })
     };
 
+    // Descarga normal en navegador; panel para copiar en la app de escritorio.
+    let entregar_csv = {
+        let export_text = export_text.clone();
+        move |nombre: &str, contenido: String| {
+            if platform::es_escritorio() {
+                export_text.set(Some(contenido));
+            } else {
+                platform::download_text(nombre, &contenido);
+            }
+        }
+    };
+
     let on_export = {
-        let data = data.clone();
+        let (data, entregar_csv) = (data.clone(), entregar_csv.clone());
         Callback::from(move |_: MouseEvent| {
-            let contenido = csv::to_csv(&csv::export_rows(&data));
-            platform::download_text("tokon-tech-log.csv", &contenido);
+            entregar_csv("tokon-tech-log.csv", csv::to_csv(&csv::export_rows(&data)));
         })
     };
 
-    let on_template = Callback::from(move |_: MouseEvent| {
-        let contenido = csv::to_csv(&csv::template_rows());
-        platform::download_text("plantilla-tech.csv", &contenido);
-    });
+    let on_template = {
+        let entregar_csv = entregar_csv.clone();
+        Callback::from(move |_: MouseEvent| {
+            entregar_csv("plantilla-tech.csv", csv::to_csv(&csv::template_rows()));
+        })
+    };
 
     let on_pick_file = {
         let file_ref = file_ref.clone();
@@ -328,6 +358,29 @@ pub fn app() -> Html {
                     }}>
                         { icons::close(13) }
                     </button>
+                </div>
+            }
+
+            if let Some(texto) = &*export_text {
+                <div class="export-panel">
+                    <div class="export-panel-head">
+                        <span>
+                            { "Copia esto (Ctrl+C), pégalo en el Bloc de notas y guárdalo como un archivo .csv" }
+                        </span>
+                        <button class="icon-btn" onclick={{
+                            let export_text = export_text.clone();
+                            Callback::from(move |_: MouseEvent| export_text.set(None))
+                        }}>
+                            { icons::close(13) }
+                        </button>
+                    </div>
+                    <textarea
+                        ref={export_ref.clone()}
+                        class="export-textarea"
+                        readonly=true
+                        spellcheck="false"
+                        value={texto.clone()}
+                    />
                 </div>
             }
 
