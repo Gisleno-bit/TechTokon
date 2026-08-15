@@ -94,3 +94,7 @@ pub fn check(size: u32) -> Html {
 pub fn close(size: u32) -> Html {
     svg(size, html! { <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></> })
 }
+
+pub fn more(size: u32) -> Html {
+    svg(size, html! { <><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" /></> })
+}
