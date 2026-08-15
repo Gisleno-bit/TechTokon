@@ -41,6 +41,17 @@ body { min-height: 100vh; }
 .header-title { font-family: var(--font-display); font-weight: 700; font-size: 15px; letter-spacing: 0.06em; }
 .header-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* El boton "…" solo existe en ventana estrecha; el @media de mas abajo lo
+   muestra. Esta regla va ANTES a proposito: si fuera despues ganaria ella
+   por orden de cascada y el boton no aparecena nunca. */
+.header-brand { display: flex; align-items: center; gap: 10px; }
+.header-menu-btn {
+  display: none; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex-shrink: 0;
+  background: transparent; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer;
+}
+.header-menu-btn:hover { color: var(--text); border-color: var(--text-faint); }
 
 .import-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -221,6 +232,14 @@ body { min-height: 100vh; }
    antes la tech y el formulario sin tener que hacer scroll. */
 @media (max-width: 560px) {
   .header { padding: 10px 12px; gap: 8px; }
+
+  /* La marca ocupa toda la fila y el boton "…" se va al borde derecho. */
+  .header-brand { flex: 1 1 100%; justify-content: space-between; }
+  .header-menu-btn { display: inline-flex; }
+
+  /* Los cuatro botones se esconden hasta pulsar "…". */
+  .header-actions { display: none; width: 100%; }
+  .header-actions.open { display: flex; }
   .header-title { font-size: 13px; }
   .header-sub { font-size: 11px; }
   .header-actions { gap: 6px; }
