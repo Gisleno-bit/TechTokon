@@ -124,7 +124,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="desktop-${{ github.run_number }}"
+          # La etiqueta lleva la fecha y hora exactas. Antes usaba el numero
+          # de ejecucion y chocaba con etiquetas de workflows anteriores; asi
+          # no puede repetirse nunca y no hace falta borrar nada.
+          TAG="desktop-$(date -u +%Y%m%d-%H%M%S)"
+          echo "Etiqueta: $TAG"
+
           gh release create "$TAG" salida/* \
             --title "Tokon Tech Log - escritorio (build ${{ github.run_number }})" \
             --notes "Version de escritorio para Windows.
