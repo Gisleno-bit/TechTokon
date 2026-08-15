@@ -55,6 +55,11 @@ fn direction_arrow(c: char) -> Option<char> {
 /// que no supimos interpretar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
+    /// Anotacion entre parentesis delante del golpe, p.ej. "(JC)" de
+    /// "(JC)JM". Se pinta como etiqueta, no como boton.
+    pub note: Option<String>,
+    /// El golpe va en el aire: prefijo "j", "J", "j." o "J.".
+    pub aerial: bool,
     /// Flechas ya convertidas, p.ej. "↓↘" para "23".
     pub directions: String,
     pub button: Option<&'static ButtonStyle>,
@@ -74,6 +79,19 @@ pub struct Group {
     pub alternatives: Vec<Alternative>,
 }
 
+impl Group {
+    /// True si el grupo no contiene ningun golpe: es una palabra suelta o una
+    /// nota ("land", "held", "(okizeme)", "Freedom Charge"). La vista no les
+    /// pone el separador "›" entre medias, que ahi sobra.
+    pub fn es_texto(&self) -> bool {
+        self.alternatives.iter().all(|alt| {
+            alt.atoms
+                .iter()
+                .all(|a| a.button.is_none() && a.directions.is_empty() && !a.aerial)
+        })
+    }
+}
+
 /// Separadores que la gente usa entre golpes: coma, guion, flecha, mayor que.
 fn normalize_separators(raw: &str) -> String {
     raw.chars()
@@ -87,10 +105,26 @@ fn normalize_separators(raw: &str) -> String {
 /// Todo lo que no encaja se muestra en gris, sin tocarlo.
 fn plain(sub: &str) -> Atom {
     Atom {
+        note: None,
+        aerial: false,
         directions: String::new(),
         button: None,
         fallback: Some(sub.to_string()),
     }
+}
+
+/// ¿El texto es "direcciones opcionales + boton conocido"? Se usa para decidir
+/// si una "j" delante es de salto o solo la primera letra de una palabra: en
+/// "JM" si lo es, en "jump" no.
+fn parece_golpe(s: &str) -> bool {
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.contains('0') {
+        return false;
+    }
+    let letras: String = s.chars().skip(digits.chars().count()).collect();
+    !letras.is_empty()
+        && letras.chars().all(|c| c.is_ascii_alphabetic())
+        && button_style(&letras.to_ascii_uppercase()).is_some()
 }
 
 fn parse_atom(sub: &str) -> Atom {
@@ -98,31 +132,56 @@ fn parse_atom(sub: &str) -> Atom {
         return plain(sub);
     }
 
-    let digits: String = sub.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let rest: String = sub.chars().skip(digits.chars().count()).collect();
+    let mut resto = sub;
+
+    // Nota entre parentesis delante: "(JC)JM" -> nota "(JC)" + golpe "JM".
+    let mut note = None;
+    if resto.starts_with('(') {
+        if let Some(cierre) = resto.find(')') {
+            note = Some(resto[..=cierre].to_string());
+            resto = &resto[cierre + 1..];
+            if resto.is_empty() {
+                // Solo la nota, sin golpe detras: "(okizeme)".
+                return Atom { note, aerial: false, directions: String::new(), button: None, fallback: None };
+            }
+        }
+    }
+
+    // Prefijo de salto. Solo cuenta si lo que sigue es un golpe de verdad,
+    // para no destrozar palabras que empiezan por j ("jump", "juggle").
+    let mut aerial = false;
+    if resto.starts_with(['j', 'J']) {
+        let tras_j = &resto[1..];
+        let tras_j = tras_j.strip_prefix('.').unwrap_or(tras_j);
+        if parece_golpe(tras_j) {
+            aerial = true;
+            resto = tras_j;
+        }
+    }
+
+    let digits: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let letras: String = resto.chars().skip(digits.chars().count()).collect();
 
     // Direcciones validas son 1-9; un 0 invalida el tramo entero.
-    let arrows: Option<String> = digits.chars().map(direction_arrow).collect();
-    let arrows = match arrows {
-        Some(a) => a,
-        None => return plain(sub),
+    let Some(arrows) = digits.chars().map(direction_arrow).collect::<Option<String>>() else {
+        return Atom { note, aerial, directions: String::new(), button: None, fallback: Some(resto.to_string()) };
     };
 
-    if rest.is_empty() {
+    if letras.is_empty() {
         // Solo direcciones, p.ej. "236".
-        return Atom { directions: arrows, button: None, fallback: None };
+        return Atom { note, aerial, directions: arrows, button: None, fallback: None };
     }
 
-    if !rest.chars().all(|c| c.is_ascii_alphabetic()) {
-        // Mezcla rara como "j.L" o "5[H]": se muestra entera sin interpretar.
-        return plain(sub);
+    if !letras.chars().all(|c| c.is_ascii_alphabetic()) {
+        // Mezcla rara como "5[H]": se muestra entera sin interpretar.
+        return Atom { note, aerial, directions: String::new(), button: None, fallback: Some(resto.to_string()) };
     }
 
-    match button_style(&rest.to_ascii_uppercase()) {
+    match button_style(&letras.to_ascii_uppercase()) {
         // Direcciones + boton conocido: el caso normal.
-        Some(style) => Atom { directions: arrows, button: Some(style), fallback: None },
-        // Palabra que no es un boton ("2Special"): conservamos ambas partes.
-        None => Atom { directions: arrows, button: None, fallback: Some(rest) },
+        Some(style) => Atom { note, aerial, directions: arrows, button: Some(style), fallback: None },
+        // Palabra que no es un boton ("land", "held"): se conserva tal cual.
+        None => Atom { note, aerial, directions: arrows, button: None, fallback: Some(letras) },
     }
 }
 
@@ -232,8 +291,113 @@ mod tests {
         let raw = "2L, 5M, 236H, M+H, j.L";
         let grupos = parse(raw);
         assert_eq!(grupos.len(), 5);
-        // No debe romperse ni perder informacion por el camino.
-        assert_eq!(solo_botones(raw), ["L", "M", "H", "M", "H"]);
+        // "j.L" cuenta como boton L en el aire, de ahi la sexta letra.
+        assert_eq!(solo_botones(raw), ["L", "M", "H", "M", "H", "L"]);
+        assert!(atomos(raw).last().unwrap().aerial, "el j.L final es un salto");
+    }
+
+    fn atomos(raw: &str) -> Vec<Atom> {
+        parse(raw)
+            .iter()
+            .flat_map(|g| g.alternatives.iter())
+            .flat_map(|a| a.atoms.iter())
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn la_j_de_salto_no_es_un_boton() {
+        let a = &atomos("JM")[0];
+        assert!(a.aerial, "JM debe marcarse como salto");
+        assert_eq!(a.button.unwrap().code, "M");
+        assert!(a.fallback.is_none(), "la J no debe quedar como texto suelto");
+    }
+
+    #[test]
+    fn variantes_del_prefijo_de_salto() {
+        for raw in ["JM", "jM", "j.M", "J.M", "jm"] {
+            let a = &atomos(raw)[0];
+            assert!(a.aerial, "{raw} deberia ser salto");
+            assert_eq!(a.button.unwrap().code, "M", "{raw}");
+        }
+    }
+
+    #[test]
+    fn salto_con_direccion() {
+        let a = &atomos("J6H")[0];
+        assert!(a.aerial);
+        assert_eq!(a.directions, "→");
+        assert_eq!(a.button.unwrap().code, "H");
+    }
+
+    #[test]
+    fn una_palabra_que_empieza_por_j_no_es_un_salto() {
+        for palabra in ["jump", "juggle", "jab"] {
+            let a = &atomos(palabra)[0];
+            assert!(!a.aerial, "{palabra} no deberia marcarse como salto");
+            assert_eq!(a.fallback.as_deref(), Some(palabra));
+        }
+    }
+
+    #[test]
+    fn nota_entre_parentesis_delante_del_golpe() {
+        let a = &atomos("(JC)JM")[0];
+        assert_eq!(a.note.as_deref(), Some("(JC)"));
+        assert!(a.aerial);
+        assert_eq!(a.button.unwrap().code, "M");
+    }
+
+    #[test]
+    fn nota_suelta_entre_parentesis() {
+        let a = &atomos("(okizeme)")[0];
+        assert_eq!(a.note.as_deref(), Some("(okizeme)"));
+        assert!(a.button.is_none());
+        assert!(a.fallback.is_none());
+    }
+
+    #[test]
+    fn el_mas_sigue_funcionando_con_saltos() {
+        let a = atomos("JM+H");
+        assert_eq!(a.len(), 2);
+        assert!(a[0].aerial);
+        assert_eq!(a[0].button.unwrap().code, "M");
+        assert!(!a[1].aerial);
+        assert_eq!(a[1].button.unwrap().code, "H");
+    }
+
+    #[test]
+    fn las_palabras_sueltas_no_llevan_separador() {
+        let grupos = parse("2H land 5M");
+        assert!(!grupos[0].es_texto(), "2H es un golpe");
+        assert!(grupos[1].es_texto(), "land es texto");
+        assert!(!grupos[2].es_texto(), "5M es un golpe");
+    }
+
+    #[test]
+    fn combo_real_de_iron_man() {
+        let raw = "L>L>2M>5H>(JC)JM>J6H>2U>JM,M>JU>5H>(JC)JH>L Freedom Charge";
+        let ats = atomos(raw);
+
+        // Ni una sola J debe quedarse como texto suelto.
+        for a in &ats {
+            if let Some(t) = &a.fallback {
+                assert!(
+                    !t.eq_ignore_ascii_case("j"),
+                    "ha quedado una J suelta sin interpretar"
+                );
+            }
+        }
+
+        let saltos = ats.iter().filter(|a| a.aerial).count();
+        assert_eq!(saltos, 5, "JM, J6H, JM, JU, JH son 5 golpes en el aire");
+
+        let notas = ats.iter().filter(|a| a.note.is_some()).count();
+        assert_eq!(notas, 2, "los dos (JC)");
+
+        // El nombre del move sobrevive como texto.
+        let textos: Vec<String> = ats.iter().filter_map(|a| a.fallback.clone()).collect();
+        assert!(textos.contains(&"Freedom".to_string()));
+        assert!(textos.contains(&"Charge".to_string()));
     }
 
     #[test]
