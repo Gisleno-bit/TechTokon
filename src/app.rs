@@ -72,6 +72,9 @@ pub fn app() -> Html {
     // En escritorio la descarga no funciona, asi que el CSV se muestra aqui
     // para copiarlo. En navegador esto se queda siempre en None.
     let export_text = use_state(|| None as Option<String>);
+    // En ventana estrecha los botones de la cabecera se esconden detras del
+    // boton "…" para dejar sitio a la tech.
+    let actions_open = use_state(|| false);
     let file_ref = use_node_ref();
     let export_ref = use_node_ref();
 
@@ -300,14 +303,26 @@ pub fn app() -> Html {
     html! {
         <div class="app">
             <header class="header">
-                <div>
-                    <div class="header-title">{ "TOKON // TECH LOG" }</div>
-                    <div class="header-sub">
-                        { &team.name }
-                        if *save_error { { " · cambios sin guardar" } }
+                <div class="header-brand">
+                    <div>
+                        <div class="header-title">{ "TOKON // TECH LOG" }</div>
+                        <div class="header-sub">
+                            { &team.name }
+                            if *save_error { { " · cambios sin guardar" } }
+                        </div>
                     </div>
+                    <button
+                        class="header-menu-btn"
+                        title="Mostrar u ocultar las acciones"
+                        onclick={{
+                            let actions_open = actions_open.clone();
+                            Callback::from(move |_: MouseEvent| actions_open.set(!*actions_open))
+                        }}
+                    >
+                        { icons::more(15) }
+                    </button>
                 </div>
-                <div class="header-actions">
+                <div class={classes!("header-actions", actions_open.then_some("open"))}>
                     <input
                         ref={file_ref}
                         type="file"
