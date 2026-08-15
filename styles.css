@@ -213,6 +213,21 @@ body { min-height: 100vh; }
 .btn-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; line-height: 1.4; }
 .badge-plain { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); background: var(--panel-alt); padding: 2px 6px; border-radius: 4px; }
 .joiner { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); margin: 0 2px; }
+
+/* Marca de salto: deliberadamente distinta de un badge de boton, para que se
+   lea como "esto pasa en el aire" y no como una tecla mas. */
+.aerial-mark {
+  font-family: var(--font-mono); font-size: 11px; font-style: italic;
+  color: var(--accent-team); margin-right: 1px;
+}
+/* Anotacion entre parentesis: "(JC)", "(okizeme)". */
+.badge-note {
+  font-family: var(--font-body); font-size: 10px; color: var(--text-faint);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 1px 5px; margin-right: 3px;
+}
+/* Palabras sueltas ("land", "Freedom Charge"): sin el separador "›". */
+.notation-group-text:not(:first-child)::before { content: none; }
 .notation-empty { color: var(--text-faint); font-size: 12px; font-style: italic; }
 
 @media (max-width: 720px) {
@@ -233,8 +248,12 @@ body { min-height: 100vh; }
 @media (max-width: 560px) {
   .header { padding: 10px 12px; gap: 8px; }
 
-  /* La marca ocupa toda la fila y el boton "…" se va al borde derecho. */
-  .header-brand { flex: 1 1 100%; justify-content: space-between; }
+  /* En ventana pequena la cabecera se reduce a una barra fina con el boton
+     "…". El titulo y el nombre del equipo se quitan: ocupan sitio y no
+     aportan nada mientras consultas tech. */
+  .header { padding: 4px 8px; }
+  .header-title, .header-sub { display: none; }
+  .header-brand { flex: 1 1 100%; justify-content: flex-end; }
   .header-menu-btn { display: inline-flex; }
 
   /* Los cuatro botones se esconden hasta pulsar "…". */
