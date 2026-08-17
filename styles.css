@@ -206,7 +206,22 @@ body { min-height: 100vh; }
 
 .notation-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .notation-group { display: inline-flex; align-items: center; }
-.notation-group:not(:first-child)::before { content: '›'; color: var(--text-faint); margin-right: 5px; font-family: var(--font-display); }
+.notation-group { gap: 4px; }
+/* El conector lo pinta la vista, no el CSS: hay que distinguir "›" de "‹". */
+.link-mark { color: var(--text-faint); font-family: var(--font-display); margin-right: 2px; }
+
+/* Modificadores que no son teclas: "g.", "j.", "jc", "IAD", "(JC)".
+   A proposito en gris y pequeño, para que no compitan con los botones. */
+.piece-label {
+  font-family: var(--font-mono); font-size: 10.5px; font-style: italic;
+  color: var(--accent-team); margin-right: 1px;
+}
+/* Direccion que se mantiene pulsada: "[→]". */
+.dir-hold {
+  font-family: var(--font-mono); font-size: 12px;
+  color: var(--text-muted); margin-right: 2px;
+  border-bottom: 1px solid var(--text-faint);
+}
 .notation-alt { display: inline-flex; align-items: center; }
 .notation-atom { display: inline-flex; align-items: center; }
 .dir-run { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); margin-right: 2px; }
@@ -214,20 +229,6 @@ body { min-height: 100vh; }
 .badge-plain { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); background: var(--panel-alt); padding: 2px 6px; border-radius: 4px; }
 .joiner { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); margin: 0 2px; }
 
-/* Marca de salto: deliberadamente distinta de un badge de boton, para que se
-   lea como "esto pasa en el aire" y no como una tecla mas. */
-.aerial-mark {
-  font-family: var(--font-mono); font-size: 11px; font-style: italic;
-  color: var(--accent-team); margin-right: 1px;
-}
-/* Anotacion entre parentesis: "(JC)", "(okizeme)". */
-.badge-note {
-  font-family: var(--font-body); font-size: 10px; color: var(--text-faint);
-  border: 1px solid var(--border); border-radius: 4px;
-  padding: 1px 5px; margin-right: 3px;
-}
-/* Palabras sueltas ("land", "Freedom Charge"): sin el separador "›". */
-.notation-group-text:not(:first-child)::before { content: none; }
 .notation-empty { color: var(--text-faint); font-size: 12px; font-style: italic; }
 
 @media (max-width: 720px) {
