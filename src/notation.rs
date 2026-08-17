@@ -238,7 +238,13 @@ fn parse_atom(sub: &str) -> Atom {
         }
 
         // Cualquier otro simbolo se acumula y se muestra tal cual.
+        //
+        // El primer caracter se consume SIEMPRE, antes de mirar nada. Es lo
+        // que evita que un "(" o un "[" sin cerrar dejen el bucle parado en
+        // el sitio: eso colgaba el hilo de la interfaz y la app entera se
+        // quedaba muerta, sin ningun error, sin responder a ningun boton.
         let inicio = i;
+        i += 1;
         while i < chars.len()
             && !chars[i].is_ascii_alphanumeric()
             && !matches!(chars[i], '(' | '[' | '.')
@@ -249,7 +255,7 @@ fn parse_atom(sub: &str) -> Atom {
         pieces.push(Piece::Text(run));
     }
 
-    if pieces.is_empty() {
+    if pieces.is_empty() && !sub.is_empty() {
         pieces.push(Piece::Text(sub.to_string()));
     }
     Atom { pieces }
@@ -550,6 +556,46 @@ mod tests {
         assert!(jc.is_some(), "no se ha encontrado el jc9");
         // El total de botones del combo
         assert_eq!(botones(COMBOS[0]).len(), 19);
+    }
+
+    #[test]
+    fn simbolos_sin_cerrar_no_cuelgan_el_parser() {
+        // Cada uno de estos colgaba la app entera. Si vuelve a pasar, este
+        // test se queda bloqueado y la compilacion falla por tiempo.
+        for raw in [
+            "j.[6HH",
+            "(JC j.M",
+            "5H > [ > 2M",
+            "5H > ( > 2M",
+            "j.[",
+            "(",
+            "[",
+            "))",
+            "]]",
+            "[[6]]",
+            "((JC))",
+        ] {
+            let grupos = parse(raw);
+            assert!(!grupos.is_empty(), "{raw} no deberia quedarse vacio");
+        }
+    }
+
+    #[test]
+    fn nada_se_pierde_aunque_falte_el_cierre() {
+        // El texto sigue estando, aunque no se entienda.
+        let p = piezas("j.[6HH");
+        assert!(p.iter().any(|x| matches!(x, Piece::Label(t) if t == "j.")));
+        assert!(p.iter().any(|x| matches!(x, Piece::Text(t) if t == "[")));
+        assert_eq!(botones("j.[6HH"), ["H", "H"]);
+    }
+
+    #[test]
+    fn una_barra_doble_no_deja_etiquetas_vacias() {
+        let p = piezas("L//M");
+        assert!(
+            !p.iter().any(|x| matches!(x, Piece::Text(t) if t.is_empty())),
+            "no deberia haber texto vacio: {p:?}"
+        );
     }
 
     #[test]
