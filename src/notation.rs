@@ -1,8 +1,12 @@
-//! Convierte la notacion escrita a mano ("L, L, M, H, 2H", "236M", "M+H")
-//! en algo que la UI pueda pintar como botones de colores.
+//! Convierte la notacion escrita a mano en piezas que la UI puede pintar.
 //!
-//! El texto que escribe el usuario manda: aqui no se corrige nada, solo se
-//! reconoce lo que se puede y el resto se muestra tal cual.
+//! El parser recorre cada golpe de izquierda a derecha y va emitiendo trozos:
+//! etiquetas ("g.", "j.", "jc", "IAD"), direcciones, direcciones mantenidas
+//! ("[6]"), botones y texto suelto. Esa forma libre es lo que permite tragar
+//! cosas como `g.236LLL`, `j.[6]HH` o `5AA` sin tener que preverlas una a una.
+//!
+//! Regla de fondo: lo que escribe el usuario manda. Aqui no se corrige nada;
+//! lo que no se reconoce se muestra tal cual en gris, nunca se descarta.
 
 /// Colores de cada boton de Tokon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,11 +35,14 @@ pub const LEGEND: &[(&str, &str)] = &[
     ("A", "Assemble"),
 ];
 
+/// Prefijos que no son botones: modifican al golpe que viene detras.
+/// Ordenados de mas largo a mas corto, que es como se prueban.
+const PREFIJOS: &[&str] = &["iad", "jc", "dl", "ja", "j", "g"];
+
 pub fn button_style(code: &str) -> Option<&'static ButtonStyle> {
     BUTTONS.iter().find(|b| b.code == code)
 }
 
-/// Direccion del numpad a flecha.
 fn direction_arrow(c: char) -> Option<char> {
     match c {
         '1' => Some('↙'),
@@ -51,23 +58,35 @@ fn direction_arrow(c: char) -> Option<char> {
     }
 }
 
-/// La unidad minima: unas direcciones opcionales y un boton, o texto suelto
-/// que no supimos interpretar.
+/// Cada trozo reconocible dentro de un golpe.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Atom {
-    /// Anotacion entre parentesis delante del golpe, p.ej. "(JC)" de
-    /// "(JC)JM". Se pinta como etiqueta, no como boton.
-    pub note: Option<String>,
-    /// El golpe va en el aire: prefijo "j", "J", "j." o "J.".
-    pub aerial: bool,
-    /// Flechas ya convertidas, p.ej. "↓↘" para "23".
-    pub directions: String,
-    pub button: Option<&'static ButtonStyle>,
-    /// Texto que no encaja en el esquema; se pinta en gris tal cual.
-    pub fallback: Option<String>,
+pub enum Piece {
+    /// Modificador o anotacion: "g.", "j.", "jc", "IAD", "dl", "(JC)".
+    /// Se pinta pequeño y en gris: no es una tecla.
+    Label(String),
+    /// Direcciones ya convertidas a flechas: "236" -> "↓↘→".
+    Directions(String),
+    /// Direccion que se mantiene pulsada: "[6]" -> "→".
+    Hold(String),
+    /// Un boton, con su color.
+    Button(&'static ButtonStyle),
+    /// Lo que no se ha reconocido. Se muestra sin tocar.
+    Text(String),
 }
 
-/// Atomos unidos por "+" (pulsados a la vez).
+/// Un golpe: la secuencia de piezas que lo componen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Atom {
+    pub pieces: Vec<Piece>,
+}
+
+impl Atom {
+    pub fn tiene_boton(&self) -> bool {
+        self.pieces.iter().any(|p| matches!(p, Piece::Button(_)))
+    }
+}
+
+/// Golpes unidos por "+" (pulsados a la vez).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Alternative {
     pub atoms: Vec<Atom>,
@@ -76,332 +95,465 @@ pub struct Alternative {
 /// Alternativas separadas por "/" (vale una u otra).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group {
+    /// El conector que venia justo antes: '>' o '<'. Se conserva tal cual en
+    /// vez de unificarlos, porque el usuario los usa a proposito distintos.
+    /// None cuando solo habia un espacio.
+    pub link: Option<char>,
     pub alternatives: Vec<Alternative>,
 }
 
 impl Group {
-    /// True si el grupo no contiene ningun golpe: es una palabra suelta o una
-    /// nota ("land", "held", "(okizeme)", "Freedom Charge"). La vista no les
-    /// pone el separador "›" entre medias, que ahi sobra.
-    pub fn es_texto(&self) -> bool {
-        self.alternatives.iter().all(|alt| {
-            alt.atoms
-                .iter()
-                .all(|a| a.button.is_none() && a.directions.is_empty() && !a.aerial)
-        })
+    pub fn tiene_boton(&self) -> bool {
+        self.alternatives
+            .iter()
+            .any(|alt| alt.atoms.iter().any(|a| a.tiene_boton()))
     }
 }
 
-/// Separadores que la gente usa entre golpes: coma, guion, flecha, mayor que.
-fn normalize_separators(raw: &str) -> String {
-    raw.chars()
-        .map(|c| match c {
-            ',' | '-' | '>' | '→' => ' ',
-            other => other,
-        })
-        .collect()
-}
-
-/// Todo lo que no encaja se muestra en gris, sin tocarlo.
-fn plain(sub: &str) -> Atom {
-    Atom {
-        note: None,
-        aerial: false,
-        directions: String::new(),
-        button: None,
-        fallback: Some(sub.to_string()),
+/// ¿Toda la tirada de letras son botones seguidos? "HH" -> H,H; "LLL" -> L,L,L.
+/// Devuelve None si algo no encaja, para no destrozar palabras como "land".
+fn descomponer_botones(run: &str) -> Option<Vec<&'static ButtonStyle>> {
+    let mayus = run.to_ascii_uppercase();
+    let mut salida = Vec::new();
+    let mut i = 0;
+    while i < mayus.len() {
+        // Primero codigos de dos letras (QS, QA), luego de una.
+        let encontrado = [2usize, 1].iter().find_map(|&largo| {
+            mayus
+                .get(i..i + largo)
+                .and_then(button_style)
+                .map(|st| (st, largo))
+        });
+        match encontrado {
+            Some((st, largo)) => {
+                salida.push(st);
+                i += largo;
+            }
+            None => return None,
+        }
     }
+    (!salida.is_empty()).then_some(salida)
 }
 
-/// ¿El texto es "direcciones opcionales + boton conocido"? Se usa para decidir
-/// si una "j" delante es de salto o solo la primera letra de una palabra: en
-/// "JM" si lo es, en "jump" no.
-fn parece_golpe(s: &str) -> bool {
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.contains('0') {
-        return false;
+/// Interpreta una tirada de letras. `punto` indica si venia seguida de ".".
+fn piezas_de_letras(run: &str, punto: bool, salida: &mut Vec<Piece>) {
+    // "g.", "j." y cualquier otro prefijo con punto: etiqueta.
+    if punto && button_style(&run.to_ascii_uppercase()).is_none() {
+        salida.push(Piece::Label(format!("{run}.")));
+        return;
     }
-    let letras: String = s.chars().skip(digits.chars().count()).collect();
-    !letras.is_empty()
-        && letras.chars().all(|c| c.is_ascii_alphabetic())
-        && button_style(&letras.to_ascii_uppercase()).is_some()
+
+    // Botones seguidos: "M", "HH", "LLL", "QS".
+    if let Some(botones) = descomponer_botones(run) {
+        salida.extend(botones.into_iter().map(Piece::Button));
+        return;
+    }
+
+    // Prefijo conocido y detras botones: "JM" -> j + M, "jc" -> jc.
+    let minus = run.to_ascii_lowercase();
+    for prefijo in PREFIJOS {
+        let Some(resto) = minus.strip_prefix(prefijo) else {
+            continue;
+        };
+        if resto.is_empty() {
+            salida.push(Piece::Label(run.to_string()));
+            return;
+        }
+        if let Some(botones) = descomponer_botones(&run[prefijo.len()..]) {
+            salida.push(Piece::Label(run[..prefijo.len()].to_string()));
+            salida.extend(botones.into_iter().map(Piece::Button));
+            return;
+        }
+    }
+
+    // Una palabra normal: "land", "held", "Freedom".
+    salida.push(Piece::Text(run.to_string()));
 }
 
+/// Trocea un golpe suelto (ya sin separadores) en sus piezas.
 fn parse_atom(sub: &str) -> Atom {
-    if sub.is_empty() {
-        return plain(sub);
-    }
+    let chars: Vec<char> = sub.chars().collect();
+    let mut pieces = Vec::new();
+    let mut i = 0;
 
-    let mut resto = sub;
+    while i < chars.len() {
+        let c = chars[i];
 
-    // Nota entre parentesis delante: "(JC)JM" -> nota "(JC)" + golpe "JM".
-    let mut note = None;
-    if resto.starts_with('(') {
-        if let Some(cierre) = resto.find(')') {
-            note = Some(resto[..=cierre].to_string());
-            resto = &resto[cierre + 1..];
-            if resto.is_empty() {
-                // Solo la nota, sin golpe detras: "(okizeme)".
-                return Atom { note, aerial: false, directions: String::new(), button: None, fallback: None };
+        // Anotacion entre parentesis: "(JC)", "(okizeme)".
+        if c == '(' {
+            if let Some(rel) = chars[i..].iter().position(|&x| x == ')') {
+                pieces.push(Piece::Label(chars[i..=i + rel].iter().collect()));
+                i += rel + 1;
+                continue;
             }
         }
-    }
 
-    // Prefijo de salto. Solo cuenta si lo que sigue es un golpe de verdad,
-    // para no destrozar palabras que empiezan por j ("jump", "juggle").
-    let mut aerial = false;
-    if resto.starts_with(['j', 'J']) {
-        let tras_j = &resto[1..];
-        let tras_j = tras_j.strip_prefix('.').unwrap_or(tras_j);
-        if parece_golpe(tras_j) {
-            aerial = true;
-            resto = tras_j;
+        // Direccion mantenida: "[6]". Si dentro no hay direcciones, se deja
+        // como etiqueta en vez de inventarse nada.
+        if c == '[' {
+            if let Some(rel) = chars[i..].iter().position(|&x| x == ']') {
+                let dentro: String = chars[i + 1..i + rel].iter().collect();
+                let flechas: Option<String> = dentro.chars().map(direction_arrow).collect();
+                match flechas {
+                    Some(f) if !f.is_empty() => pieces.push(Piece::Hold(f)),
+                    _ => pieces.push(Piece::Label(chars[i..=i + rel].iter().collect())),
+                }
+                i += rel + 1;
+                continue;
+            }
         }
+
+        if c.is_ascii_digit() {
+            let inicio = i;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            let run: String = chars[inicio..i].iter().collect();
+            match run.chars().map(direction_arrow).collect::<Option<String>>() {
+                Some(flechas) => pieces.push(Piece::Directions(flechas)),
+                // Lleva un 0, que no es una direccion valida.
+                None => pieces.push(Piece::Text(run)),
+            }
+            continue;
+        }
+
+        if c.is_ascii_alphabetic() {
+            let inicio = i;
+            while i < chars.len() && chars[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            let run: String = chars[inicio..i].iter().collect();
+            let punto = chars.get(i) == Some(&'.');
+            piezas_de_letras(&run, punto, &mut pieces);
+            if punto {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Punto suelto: se ignora, ya lo usan los prefijos.
+        if c == '.' {
+            i += 1;
+            continue;
+        }
+
+        // Cualquier otro simbolo se acumula y se muestra tal cual.
+        let inicio = i;
+        while i < chars.len()
+            && !chars[i].is_ascii_alphanumeric()
+            && !matches!(chars[i], '(' | '[' | '.')
+        {
+            i += 1;
+        }
+        let run: String = chars[inicio..i].iter().collect();
+        pieces.push(Piece::Text(run));
     }
 
-    let digits: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let letras: String = resto.chars().skip(digits.chars().count()).collect();
-
-    // Direcciones validas son 1-9; un 0 invalida el tramo entero.
-    let Some(arrows) = digits.chars().map(direction_arrow).collect::<Option<String>>() else {
-        return Atom { note, aerial, directions: String::new(), button: None, fallback: Some(resto.to_string()) };
-    };
-
-    if letras.is_empty() {
-        // Solo direcciones, p.ej. "236".
-        return Atom { note, aerial, directions: arrows, button: None, fallback: None };
+    if pieces.is_empty() {
+        pieces.push(Piece::Text(sub.to_string()));
     }
-
-    if !letras.chars().all(|c| c.is_ascii_alphabetic()) {
-        // Mezcla rara como "5[H]": se muestra entera sin interpretar.
-        return Atom { note, aerial, directions: String::new(), button: None, fallback: Some(resto.to_string()) };
-    }
-
-    match button_style(&letras.to_ascii_uppercase()) {
-        // Direcciones + boton conocido: el caso normal.
-        Some(style) => Atom { note, aerial, directions: arrows, button: Some(style), fallback: None },
-        // Palabra que no es un boton ("land", "held"): se conserva tal cual.
-        None => Atom { note, aerial, directions: arrows, button: None, fallback: Some(letras) },
-    }
+    Atom { pieces }
 }
 
 /// Trocea la notacion completa en grupos pintables.
 pub fn parse(raw: &str) -> Vec<Group> {
-    normalize_separators(raw)
-        .split_whitespace()
-        .map(|token| Group {
+    // La flecha larga es lo mismo que ">". Comas y guiones solo separan.
+    let limpio = raw.replace('→', ">").replace([',', '-'], " ");
+    // Los conectores pasan a ser tokens propios, aunque vengan pegados.
+    let espaciado = limpio.replace('>', " > ").replace('<', " < ");
+
+    let mut grupos = Vec::new();
+    let mut link: Option<char> = None;
+
+    for token in espaciado.split_whitespace() {
+        match token {
+            ">" => {
+                link = Some('>');
+                continue;
+            }
+            "<" => {
+                link = Some('<');
+                continue;
+            }
+            _ => {}
+        }
+        grupos.push(Group {
+            link: link.take(),
             alternatives: token
                 .split('/')
                 .map(|alt| Alternative {
                     atoms: alt.split('+').map(parse_atom).collect(),
                 })
                 .collect(),
-        })
-        .collect()
+        });
+    }
+
+    grupos
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn solo_botones(raw: &str) -> Vec<String> {
+    fn piezas(raw: &str) -> Vec<Piece> {
         parse(raw)
             .iter()
             .flat_map(|g| g.alternatives.iter())
             .flat_map(|a| a.atoms.iter())
-            .filter_map(|at| at.button.map(|b| b.code.to_string()))
+            .flat_map(|at| at.pieces.iter())
+            .cloned()
             .collect()
     }
 
+    fn botones(raw: &str) -> Vec<String> {
+        piezas(raw)
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Button(b) => Some(b.code.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn etiquetas(raw: &str) -> Vec<String> {
+        piezas(raw)
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Label(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn textos(raw: &str) -> Vec<String> {
+        piezas(raw)
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ---- lo basico de siempre ----
+
     #[test]
-    fn cadena_basica_de_botones() {
-        let grupos = parse("L, L, M, H, 2H");
-        assert_eq!(grupos.len(), 5);
-        assert_eq!(solo_botones("L, L, M, H, 2H"), ["L", "L", "M", "H", "H"]);
+    fn cadena_basica() {
+        assert_eq!(botones("L, L, M, H, 2H"), ["L", "L", "M", "H", "H"]);
+        assert_eq!(parse("L, L, M, H, 2H").len(), 5);
     }
 
     #[test]
-    fn quarter_circle_se_convierte_en_flechas() {
-        let grupos = parse("236M");
-        assert_eq!(grupos.len(), 1);
-        let atom = &grupos[0].alternatives[0].atoms[0];
-        assert_eq!(atom.directions, "↓↘→");
-        assert_eq!(atom.button.unwrap().code, "M");
-        assert!(atom.fallback.is_none());
+    fn quarter_circle() {
+        let p = piezas("236M");
+        assert_eq!(p[0], Piece::Directions("↓↘→".into()));
+        assert_eq!(botones("236M"), ["M"]);
     }
 
     #[test]
-    fn botones_simultaneos_con_mas() {
-        let grupos = parse("M+H");
-        assert_eq!(grupos[0].alternatives.len(), 1);
-        assert_eq!(grupos[0].alternatives[0].atoms.len(), 2);
-        assert_eq!(solo_botones("M+H"), ["M", "H"]);
+    fn simultaneos_y_alternativas() {
+        assert_eq!(botones("M+H"), ["M", "H"]);
+        assert_eq!(botones("236L/M"), ["L", "M"]);
+        assert_eq!(parse("236L/M")[0].alternatives.len(), 2);
     }
 
     #[test]
-    fn alternativas_con_barra() {
-        let grupos = parse("236L/M");
-        assert_eq!(grupos.len(), 1);
-        assert_eq!(grupos[0].alternatives.len(), 2);
-        assert_eq!(solo_botones("236L/M"), ["L", "M"]);
+    fn minusculas_valen() {
+        assert_eq!(botones("l m h"), ["L", "M", "H"]);
+        assert_eq!(botones("236qs"), ["QS"]);
     }
 
     #[test]
-    fn minusculas_tambien_valen() {
-        assert_eq!(solo_botones("l m h"), ["L", "M", "H"]);
-        assert_eq!(solo_botones("236qs"), ["QS"]);
+    fn separadores_variados() {
+        for raw in ["L, M, H", "L > M > H", "L → M → H", "L-M-H", "L   M    H"] {
+            assert_eq!(botones(raw), ["L", "M", "H"], "fallo con {raw}");
+        }
     }
 
     #[test]
-    fn separadores_variados_dan_el_mismo_resultado() {
-        let esperado = ["L", "M", "H"];
-        assert_eq!(solo_botones("L, M, H"), esperado);
-        assert_eq!(solo_botones("L > M > H"), esperado);
-        assert_eq!(solo_botones("L → M → H"), esperado);
-        assert_eq!(solo_botones("L-M-H"), esperado);
-        assert_eq!(solo_botones("L   M    H"), esperado);
-    }
-
-    #[test]
-    fn texto_desconocido_se_conserva_tal_cual() {
-        let grupos = parse("j.QQQ");
-        let atom = &grupos[0].alternatives[0].atoms[0];
-        assert!(atom.button.is_none());
-        assert_eq!(atom.fallback.as_deref(), Some("j.QQQ"));
-    }
-
-    #[test]
-    fn direccion_sola_sin_boton() {
-        let grupos = parse("236");
-        let atom = &grupos[0].alternatives[0].atoms[0];
-        assert_eq!(atom.directions, "↓↘→");
-        assert!(atom.button.is_none());
-        assert!(atom.fallback.is_none());
-    }
-
-    #[test]
-    fn notacion_vacia_no_produce_grupos() {
+    fn notacion_vacia() {
         assert!(parse("").is_empty());
         assert!(parse("   ").is_empty());
         assert!(parse(" , , ").is_empty());
     }
 
-    #[test]
-    fn combo_largo_realista() {
-        let raw = "2L, 5M, 236H, M+H, j.L";
-        let grupos = parse(raw);
-        assert_eq!(grupos.len(), 5);
-        // "j.L" cuenta como boton L en el aire, de ahi la sexta letra.
-        assert_eq!(solo_botones(raw), ["L", "M", "H", "M", "H", "L"]);
-        assert!(atomos(raw).last().unwrap().aerial, "el j.L final es un salto");
-    }
-
-    fn atomos(raw: &str) -> Vec<Atom> {
-        parse(raw)
-            .iter()
-            .flat_map(|g| g.alternatives.iter())
-            .flat_map(|a| a.atoms.iter())
-            .cloned()
-            .collect()
-    }
+    // ---- prefijos ----
 
     #[test]
-    fn la_j_de_salto_no_es_un_boton() {
-        let a = &atomos("JM")[0];
-        assert!(a.aerial, "JM debe marcarse como salto");
-        assert_eq!(a.button.unwrap().code, "M");
-        assert!(a.fallback.is_none(), "la J no debe quedar como texto suelto");
-    }
-
-    #[test]
-    fn variantes_del_prefijo_de_salto() {
+    fn salto_con_y_sin_punto() {
         for raw in ["JM", "jM", "j.M", "J.M", "jm"] {
-            let a = &atomos(raw)[0];
-            assert!(a.aerial, "{raw} deberia ser salto");
-            assert_eq!(a.button.unwrap().code, "M", "{raw}");
+            assert_eq!(botones(raw), ["M"], "fallo con {raw}");
+            assert_eq!(etiquetas(raw).len(), 1, "{raw} deberia llevar etiqueta de salto");
+            assert!(textos(raw).is_empty(), "{raw} no deberia dejar texto suelto");
         }
     }
 
     #[test]
-    fn salto_con_direccion() {
-        let a = &atomos("J6H")[0];
-        assert!(a.aerial);
-        assert_eq!(a.directions, "→");
-        assert_eq!(a.button.unwrap().code, "H");
+    fn stance_de_goblin() {
+        let p = piezas("g.236LLL");
+        assert_eq!(p[0], Piece::Label("g.".into()));
+        assert_eq!(p[1], Piece::Directions("↓↘→".into()));
+        assert_eq!(botones("g.236LLL"), ["L", "L", "L"]);
     }
 
     #[test]
-    fn una_palabra_que_empieza_por_j_no_es_un_salto() {
-        for palabra in ["jump", "juggle", "jab"] {
-            let a = &atomos(palabra)[0];
-            assert!(!a.aerial, "{palabra} no deberia marcarse como salto");
-            assert_eq!(a.fallback.as_deref(), Some(palabra));
+    fn una_palabra_que_empieza_por_prefijo_no_lo_es() {
+        for palabra in ["jump", "juggle", "land", "held", "grab", "Freedom", "Charge"] {
+            assert_eq!(
+                textos(palabra),
+                vec![palabra.to_string()],
+                "{palabra} deberia quedarse como texto"
+            );
+            assert!(botones(palabra).is_empty(), "{palabra} no lleva botones");
         }
     }
 
     #[test]
-    fn nota_entre_parentesis_delante_del_golpe() {
-        let a = &atomos("(JC)JM")[0];
-        assert_eq!(a.note.as_deref(), Some("(JC)"));
-        assert!(a.aerial);
-        assert_eq!(a.button.unwrap().code, "M");
+    fn palabras_clave_sueltas() {
+        for kw in ["dl", "IAD", "jc"] {
+            assert_eq!(etiquetas(kw), vec![kw.to_string()]);
+        }
+    }
+
+    // ---- direcciones ----
+
+    #[test]
+    fn direccion_mantenida_entre_corchetes() {
+        let p = piezas("j.[6]HH");
+        assert_eq!(p[0], Piece::Label("j.".into()));
+        assert_eq!(p[1], Piece::Hold("→".into()));
+        assert_eq!(botones("j.[6]HH"), ["H", "H"]);
     }
 
     #[test]
-    fn nota_suelta_entre_parentesis() {
-        let a = &atomos("(okizeme)")[0];
-        assert_eq!(a.note.as_deref(), Some("(okizeme)"));
-        assert!(a.button.is_none());
-        assert!(a.fallback.is_none());
+    fn dash_y_direcciones_repetidas() {
+        assert_eq!(piezas("66")[0], Piece::Directions("→→".into()));
+        assert_eq!(piezas("g.22L")[1], Piece::Directions("↓↓".into()));
     }
 
     #[test]
-    fn el_mas_sigue_funcionando_con_saltos() {
-        let a = atomos("JM+H");
-        assert_eq!(a.len(), 2);
-        assert!(a[0].aerial);
-        assert_eq!(a[0].button.unwrap().code, "M");
-        assert!(!a[1].aerial);
-        assert_eq!(a[1].button.unwrap().code, "H");
+    fn jump_cancel_con_direccion() {
+        let p = piezas("jc9");
+        assert_eq!(p[0], Piece::Label("jc".into()));
+        assert_eq!(p[1], Piece::Directions("↗".into()));
     }
 
     #[test]
-    fn las_palabras_sueltas_no_llevan_separador() {
-        let grupos = parse("2H land 5M");
-        assert!(!grupos[0].es_texto(), "2H es un golpe");
-        assert!(grupos[1].es_texto(), "land es texto");
-        assert!(!grupos[2].es_texto(), "5M es un golpe");
+    fn el_cero_no_es_direccion() {
+        assert_eq!(textos("10L"), vec!["10".to_string()]);
+    }
+
+    // ---- botones repetidos ----
+
+    #[test]
+    fn botones_repetidos() {
+        assert_eq!(botones("5AA"), ["A", "A"]);
+        assert_eq!(botones("j.MMM"), ["M", "M", "M"]);
+        assert_eq!(botones("g.236LL"), ["L", "L"]);
+    }
+
+    // ---- conectores ----
+
+    #[test]
+    fn se_distingue_el_conector() {
+        let g = parse("j.U < g.236LL > g.623A");
+        assert_eq!(g[0].link, None, "el primero no lleva conector");
+        assert_eq!(g[1].link, Some('<'));
+        assert_eq!(g[2].link, Some('>'));
     }
 
     #[test]
-    fn combo_real_de_iron_man() {
-        let raw = "L>L>2M>5H>(JC)JM>J6H>2U>JM,M>JU>5H>(JC)JH>L Freedom Charge";
-        let ats = atomos(raw);
+    fn conector_pegado_sin_espacios() {
+        let g = parse("5M>2M>5H");
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[1].link, Some('>'));
+    }
 
-        // Ni una sola J debe quedarse como texto suelto.
-        for a in &ats {
-            if let Some(t) = &a.fallback {
+    #[test]
+    fn las_palabras_sueltas_no_llevan_conector() {
+        let g = parse("dl j.U");
+        assert_eq!(g.len(), 2);
+        assert!(g[0].link.is_none());
+        assert!(g[1].link.is_none(), "un espacio no es un conector");
+    }
+
+    // ---- los nueve combos reales de Green Goblin ----
+
+    const COMBOS: &[&str] = &[
+        "j.5M > 5M > 2M > 5H > jc9 j.[6]HH > j.U > g.236LLL > g.9U > j.M > j.[6]HH > dl j.U < g.236LL > g.623A > g.623A",
+        "5A > 5M > 2M > 5H > jc9 j.[6]HH > j.U > g.236LLL > g.9U > j.M > j.[6]HH > dl j.U < g.236LL > g.623A > g.623A",
+        "5M > 2M > 5H > jc9 j.[6]HH > j.U > g.236LL > g.22L > IAD > j.6H > j9 j.[6]HH > dl j.U < g.236LL > g.623A < g.623A",
+        "2M > 5H > jc9 j.[6]HH > j.U > g.236LL > g.22L > IAD > j.6H > 5H > jc9 j.[6]HH > dl j.U < g.236LL > g.623A < g.623A",
+        "5M > 2H > 214M > 66 > 5M > 5H > jc9 j.[6]HH > dl j.U < g.[6]M < g.6U > j.MM > j.U < g.236LL > g.623A < g.623A",
+        "j.M > 2H > 214M > 66 > 5M > 5H > jc9 j.[6]HH > dl j.U < g.236LLL < g.6U > j.MM > j.U < g.236LL > g.623A < g.623A",
+        "5AA > 2H > 214M > 66 > 5M > jc9 j.[6]HH > dl j.U < g.[6]M < g.6U > j.MM > j.U < g.236LL > g.623A < g.623A",
+        "2H > j.MMM > j.H > j.M > jc9 j.MM > 5H > jc9 > j.[6]HH > j.U > g.236LL > g.623L > g.623L",
+        "g.5M > g.6U > j.5MM > j.U > g.236LL > g.22L > IAD > j.6H > 5H > jc9 j.M > j.[6]HH > dl j.U > g.236LL > g.623L > g.623L",
+    ];
+
+    #[test]
+    fn los_combos_reales_no_dejan_texto_sin_reconocer() {
+        for (n, combo) in COMBOS.iter().enumerate() {
+            let sueltos = textos(combo);
+            assert!(
+                sueltos.is_empty(),
+                "combo {}: ha quedado texto sin interpretar: {:?}",
+                n + 1,
+                sueltos
+            );
+        }
+    }
+
+    #[test]
+    fn los_combos_reales_tienen_botones_en_casi_todos_los_grupos() {
+        for (n, combo) in COMBOS.iter().enumerate() {
+            let grupos = parse(combo);
+            assert!(grupos.len() > 10, "combo {}: se ha troceado mal", n + 1);
+            // Un grupo puede no llevar boton: "jc9" es un salto cancelado,
+            // "66" un dash, "dl" un retardo. Lo que no vale es que quede
+            // texto sin reconocer, que es señal de que el parser se ha
+            // rendido con algo.
+            for g in &grupos {
+                let piezas: Vec<&Piece> = g
+                    .alternatives
+                    .iter()
+                    .flat_map(|a| a.atoms.iter())
+                    .flat_map(|at| at.pieces.iter())
+                    .collect();
+                assert!(!piezas.is_empty(), "combo {}: grupo vacio", n + 1);
                 assert!(
-                    !t.eq_ignore_ascii_case("j"),
-                    "ha quedado una J suelta sin interpretar"
+                    !piezas.iter().any(|p| matches!(p, Piece::Text(_))),
+                    "combo {}: grupo con texto sin reconocer: {:?}",
+                    n + 1,
+                    piezas
                 );
             }
         }
-
-        let saltos = ats.iter().filter(|a| a.aerial).count();
-        assert_eq!(saltos, 5, "JM, J6H, JM, JU, JH son 5 golpes en el aire");
-
-        let notas = ats.iter().filter(|a| a.note.is_some()).count();
-        assert_eq!(notas, 2, "los dos (JC)");
-
-        // El nombre del move sobrevive como texto.
-        let textos: Vec<String> = ats.iter().filter_map(|a| a.fallback.clone()).collect();
-        assert!(textos.contains(&"Freedom".to_string()));
-        assert!(textos.contains(&"Charge".to_string()));
     }
 
     #[test]
-    fn cada_boton_tiene_color_definido() {
+    fn combo_uno_pieza_a_pieza() {
+        let g = parse(COMBOS[0]);
+        // "j.5M"
+        assert_eq!(
+            g[0].alternatives[0].atoms[0].pieces,
+            vec![
+                Piece::Label("j.".into()),
+                Piece::Directions("•".into()),
+                Piece::Button(button_style("M").unwrap()),
+            ]
+        );
+        // "jc9" y "j.[6]HH" van seguidos separados por espacio, sin conector
+        let jc = g.iter().find(|x| {
+            x.alternatives[0].atoms[0].pieces.first() == Some(&Piece::Label("jc".into()))
+        });
+        assert!(jc.is_some(), "no se ha encontrado el jc9");
+        // El total de botones del combo
+        assert_eq!(botones(COMBOS[0]).len(), 19);
+    }
+
+    #[test]
+    fn cada_boton_de_la_leyenda_tiene_color() {
         for (code, _) in LEGEND {
             assert!(button_style(code).is_some(), "falta color para {code}");
         }
