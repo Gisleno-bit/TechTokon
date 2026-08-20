@@ -1,0 +1,13 @@
+# Rust
+/target
+/src-tauri/target
+**/*.rs.bk
+
+# Trunk
+/dist
+
+# Editores
+.vscode/
+.idea/
+*.swp
+.DS_Store
