@@ -1,0 +1,186 @@
+name: Publicar web y .exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # para publicar la Release con el .exe
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Tests de la logica pura. Rapido, y si falla no se publica nada.
+  # ---------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --lib --locked
+
+  # ---------------------------------------------------------------------
+  # 2. El .exe de Windows. NO depende de la web: aunque Pages falle, el
+  #    ejecutable se compila igual. Corre en paralelo con el job de web.
+  # ---------------------------------------------------------------------
+  exe:
+    name: Compilar el .exe de Windows
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            src-tauri
+
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # Si falta algun archivo, lo dice todo de golpe en vez de ir
+      # descubriendolo de uno en uno a base de compilaciones fallidas.
+      - name: Comprobar que el proyecto esta completo
+        shell: bash
+        run: |
+          faltan=0
+          for f in \
+            index.html Trunk.toml styles.css Cargo.toml Cargo.lock \
+            src/main.rs src/lib.rs src/model.rs src/notation.rs src/csv.rs \
+            src/app.rs src/platform.rs \
+            src/components/mod.rs src/components/entry_form.rs \
+            src/components/entry_card.rs src/components/team_editor.rs \
+            src/components/notation_view.rs src/components/icons.rs \
+            src-tauri/Cargo.toml src-tauri/build.rs src-tauri/tauri.conf.json \
+            src-tauri/src/main.rs \
+            src-tauri/icons/32x32.png src-tauri/icons/128x128.png \
+            src-tauri/icons/128x128@2x.png src-tauri/icons/icon.ico
+          do
+            if [ -f "$f" ]; then echo "OK     $f"; else echo "FALTA  $f"; faltan=1; fi
+          done
+          echo
+          if [ "$faltan" = "1" ]; then
+            echo "Hay archivos sin subir. Mira los que ponen FALTA."
+            exit 1
+          fi
+          echo "Todo en su sitio."
+
+      - name: Compilar la interfaz a WebAssembly
+        run: trunk build --release
+
+      # Con la CLI de Tauri, no con "cargo build" a secas: es la CLI la que
+      # marca la compilacion como final. Sin ella el .exe se queda en modo
+      # desarrollo y al abrirlo busca la web en localhost.
+      - name: Instalar la CLI de Tauri
+        shell: bash
+        run: npm install -g "@tauri-apps/cli@^2"
+
+      - name: Compilar el ejecutable
+        shell: bash
+        run: tauri build
+
+      - name: Recoger el ejecutable
+        shell: bash
+        run: |
+          mkdir -p salida
+          shopt -s nullglob
+          encontrados=(src-tauri/target/release/*.exe)
+          if [ ${#encontrados[@]} -eq 0 ]; then
+            echo "No ha aparecido ningun .exe. Contenido de la carpeta:"
+            ls -la src-tauri/target/release || true
+            exit 1
+          fi
+          cp "${encontrados[0]}" "salida/TokonTechLog.exe"
+          for inst in src-tauri/target/release/bundle/nsis/*.exe; do
+            cp "$inst" "salida/"
+          done
+          echo "--- Listo ---"
+          ls -la salida
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokonTechLog-windows
+          path: salida/
+          if-no-files-found: error
+
+      # Descarga directa del .exe, sin zip, con enlace fijo para compartir.
+      - name: Publicar la Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # La etiqueta lleva la fecha y hora exactas. Antes usaba el numero
+          # de ejecucion y chocaba con etiquetas de workflows anteriores; asi
+          # no puede repetirse nunca y no hace falta borrar nada.
+          TAG="desktop-$(date -u +%Y%m%d-%H%M%S)"
+          echo "Etiqueta: $TAG"
+
+          gh release create "$TAG" salida/* \
+            --title "Tokon Tech Log - escritorio (build ${{ github.run_number }})" \
+            --notes "Version de escritorio para Windows.
+
+          - **TokonTechLog.exe**: portable, doble clic y listo.
+          - **...setup.exe**: instalador, si prefieres acceso directo en el menu Inicio.
+
+          La ventana arranca siempre encima del resto. Necesita Windows 10/11." \
+            --latest
+          echo "Descarga directa: ${{ github.server_url }}/${{ github.repository }}/releases/latest"
+
+  # ---------------------------------------------------------------------
+  # 3. La web.
+  # ---------------------------------------------------------------------
+  web:
+    name: Compilar la web
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      # Primero: si Pages no esta configurado, falla en segundos en vez de
+      # despues de compilar.
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # --public-url sale del nombre del repo, asi las rutas funcionan en
+      # https://usuario.github.io/nombre-del-repo/ sin tocar nada a mano.
+      - name: Compilar
+        run: trunk build --release --public-url "/${GITHUB_REPOSITORY#*/}/"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist
+
+  pages:
+    name: Publicar en GitHub Pages
+    needs: web
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
